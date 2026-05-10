@@ -1,4 +1,4 @@
-name: Auto tag and update latest
+name: Auto tag and update image list
 
 on:
   push:
@@ -9,16 +9,16 @@ jobs:
   tag:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # 必须的，允许推送标签
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0    # 拉取所有历史和标签
-          token: ${{ secrets.GITHUB_TOKEN }}  # 显式使用默认令牌
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate new tag and update latest.txt
+      - name: Generate new tag and update list.json
         run: |
-          # 获取当前最大的数字标签
+          # 计算新版本号
           LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             NEW_TAG="v1"
@@ -29,7 +29,7 @@ jobs:
           fi
           echo "New tag: $NEW_TAG"
 
-          # 获取本次上传的图片文件名（取第一个）
+          # 获取本次上传的第一个图片文件
           NEW_FILES=$(git diff --name-only HEAD^ HEAD -- img/ 2>/dev/null || echo "")
           if [ -z "$NEW_FILES" ]; then
             NEW_FILES=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \))
@@ -41,22 +41,23 @@ jobs:
           fi
           echo "Latest image: $LATEST_IMAGE"
 
-          # 直接把完整 CDN 链接写入 latest.txt
+          # 构建新图片的完整 CDN 链接
           IMG_URL="https://cdn.jsdelivr.net/gh/hxqemmm/picBed@${NEW_TAG}/${LATEST_IMAGE}"
-          echo "$IMG_URL" > latest.txt
 
-          # 提交 latest.txt
+          # 处理 list.json（如果不存在则创建）
+          if [ ! -f list.json ]; then
+            echo '[]' > list.json
+          fi
+          # 将新图片链接追加到数组最前面（最新的在最前）
+          jq --arg url "$IMG_URL" '. = [$url] + .' list.json > tmp.json && mv tmp.json list.json
+
+          # 提交 list.json
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
-          git add latest.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Update latest.txt to ${IMG_URL}"
-            git push
-          fi
+          git add list.json
+          git commit -m "Add image $LATEST_IMAGE to list [skip ci]"
+          git push
 
           # 打标签并推送
           git tag $NEW_TAG
           git push origin $NEW_TAG
-
-          # 把标签号也保存到环境变量，方便调试
-          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
