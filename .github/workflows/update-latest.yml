@@ -1,59 +1,48 @@
-name: Ultimate Image List Sync
+- name: Rebuild Entire Image List
+  run: |
+    echo "🔄 Rebuilding complete image list..."
 
-on:
-  push:
-    paths:
-      - 'img/**'
+    # 扫描所有图片文件（这里保持了只扫描 jpg，如果需要其他格式，按之前的加回来）
+    FILES=$(find img/ -type f -iname "*.jpg" | sort)
 
-concurrency:
-  group: image-sync
-  cancel-in-progress: true # 如果上一次没跑完，下一次会取消它，确保最终一致性
+    # 如果没有任何图片文件，生成空列表
+    if [ -z "$FILES" ]; then
+      echo "[]" > list.json
+      echo "" > latest.txt
+      echo "⚠️ No images found, generated empty list."
+    else
+      # 手动构建 JSON 数组
+      echo "[" > list.json
+      FIRST=true
+      for f in $FILES; do
+        # 构建完整的 CDN 链接
+        URL="https://cdn.jsdelivr.net/gh/hxqemmm/picBed@latest/${f}"
+        if [ "$FIRST" = true ]; then
+          echo "  \"$URL\"" >> list.json
+          FIRST=false
+        else
+          echo "  ,\"$URL\"" >> list.json
+        fi
+      done
+      echo "]" >> list.json
+      
+      echo "✅ list.json rebuilt."
 
-jobs:
-  sync-list:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # 更新 latest.txt（取最后一行作为最新图片）
+      LAST_URL=$(grep -o 'https://[^"]*' list.json | tail -1)
+      if [ -n "$LAST_URL" ]; then
+        echo "$LAST_URL" > latest.txt
+        echo "Latest image: $LAST_URL"
+      fi
+    fi
 
-      - name: Rebuild Entire Image List
-        run: |
-          echo "🔄 Rebuilding complete image list..."
-
-          # 1. 扫描 img 文件夹下所有图片，生成完整的 CDN 链接列表
-          IMG_LIST=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \) | sort | while read -r file; do
-            echo "https://cdn.jsdelivr.net/gh/hxqemmm/picBed@latest/${file}"
-          done | jq -R -s 'split("\n") | map(select(length > 0))')
-
-          # 2. 将完整列表直接覆盖写入 list.json
-          echo "$IMG_LIST" > list.json
-          echo "✅ list.json rebuilt with $(echo $IMG_LIST | jq 'length') images."
-
-          # 3. (可选)同时维护一个 latest.txt 指向最新一张图
-          LATEST_URL=$(echo "$IMG_LIST" | jq -r '.[-1] // empty')
-          if [ -n "$LATEST_URL" ]; then
-            echo "$LATEST_URL" > latest.txt
-            echo "Latest image: $LATEST_URL"
-          fi
-
-          # 4. 提交变更
-          git config user.name "github-actions[bot]"
-          git config user.email "actions@github.com"
-          git add list.json latest.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "🔄 Sync full image list [skip ci]"
-            git push
-          else
-            echo "No changes to commit."
-          fi
-
-      - name: Force update 'latest' tag
-        run: |
-          # 删除旧的 latest 标签（如果存在），强制重建
-          git push origin :refs/tags/latest 2>/dev/null || echo "No existing 'latest' tag to delete."
-          git tag -f latest
-          git push origin latest
+    # 提交改动
+    git config user.name "github-actions[bot]"
+    git config user.email "actions@github.com"
+    git add list.json latest.txt
+    if ! git diff --cached --quiet; then
+      git commit -m "🔄 Sync full image list [skip ci]"
+      git push
+    else
+      echo "No changes to commit."
+    fi
