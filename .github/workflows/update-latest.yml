@@ -1,4 +1,4 @@
-name: Auto tag and update latest
+name: Update latest image info
 
 on:
   push:
@@ -6,58 +6,43 @@ on:
       - 'img/**'
 
 jobs:
-  tag:
+  update-latest:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      new_tag: ${{ steps.tag.outputs.new_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # 获取完整历史，以便读取所有标签
+          fetch-depth: 0
 
-      - name: Generate new tag and update latest.txt
-        id: tag
+      - name: Find latest changed image and update latest.txt
         run: |
-          # 获取当前最大的数字标签
-          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            NEW_TAG="v1"
-          else
-            # 提取数字并加一
-            NUM=$(echo $LATEST_TAG | sed 's/v//')
-            NEW_NUM=$((NUM + 1))
-            NEW_TAG="v$NEW_NUM"
-          fi
-          echo "New tag: $NEW_TAG"
-          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-          
-          # 获取本次推送的 img 目录下新增/修改的文件名
+          # 获取本次推送中，img 目录下新增或修改的文件
           NEW_FILES=$(git diff --name-only HEAD^ HEAD -- img/ 2>/dev/null || echo "")
+
+          # 如果获取失败（比如首次推送），则直接取 img 下所有图片文件
           if [ -z "$NEW_FILES" ]; then
-            # 如果是第一次推送到空仓库，直接取最新文件
-            NEW_FILES=$(ls -t img/*.{jpg,jpeg,png,gif,webp} 2>/dev/null | head -1)
+            NEW_FILES=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \))
           fi
-          # 以换行分隔，只取第一个图片文件作为最新（可根据需要修改）
+
+          # 过滤出图片文件，并取第一个作为最新图片
           LATEST_IMAGE=$(echo "$NEW_FILES" | grep -E '\.(jpg|jpeg|png|gif|webp)$' | head -1)
-          echo "Latest image: $LATEST_IMAGE"
-          echo "latest_image=$LATEST_IMAGE" >> $GITHUB_OUTPUT
           
-          # 写入 latest.txt
+          if [ -z "$LATEST_IMAGE" ]; then
+            echo "No image file changed in this push."
+            exit 0
+          fi
+          
+          echo "Latest image: $LATEST_IMAGE"
           echo "$LATEST_IMAGE" > latest.txt
 
-      - name: Commit and push latest.txt
-        run: |
-          git config user.name "actions"
+          git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add latest.txt
           if ! git diff --cached --quiet; then
-            git commit -m "Update latest.txt before tagging ${{ steps.tag.outputs.new_tag }}"
+            git commit -m "Update latest.txt to $LATEST_IMAGE"
             git push
+          else
+            echo "latest.txt is already up-to-date."
           fi
-
-      - name: Create tag
-        run: |
-          git tag ${{ steps.tag.outputs.new_tag }}
-          git push origin ${{ steps.tag.outputs.new_tag }}
