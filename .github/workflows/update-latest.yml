@@ -5,59 +5,81 @@ on:
     paths:
       - 'img/**'
 
+concurrency:
+  group: image-processing-${{ github.ref }}
+  cancel-in-progress: false # 关键！设为 false 保证每次运行都执行完毕
+
 jobs:
-  tag:
+  process-images:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate new tag and update list.json
+      - name: Process images and update list
         run: |
-          # 计算新版本号
-          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            NEW_TAG="v1"
-          else
-            NUM=$(echo $LATEST_TAG | sed 's/v//')
-            NEW_NUM=$((NUM + 1))
-            NEW_TAG="v$NEW_NUM"
-          fi
-          echo "New tag: $NEW_TAG"
+          # 查看推送前和推送后的 commit SHA
+          echo "Previous commit: ${{ github.event.before }}"
+          echo "Current commit: ${{ github.event.after }}"
 
-          # 获取本次上传的第一个图片文件
-          NEW_FILES=$(git diff --name-only HEAD^ HEAD -- img/ 2>/dev/null || echo "")
-          if [ -z "$NEW_FILES" ]; then
-            NEW_FILES=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \))
+          # 如果是新分支，before 可能是全0，做特殊处理
+          if [ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]; then
+            echo "This is a new branch, processing all images in img/ directory."
+            CHANGED_FILES=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \))
+          else
+            # 获取本次推送中变更的图片文件
+            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} -- img/ | grep -E '\.(jpg|jpeg|png|gif|webp)$')
           fi
-          LATEST_IMAGE=$(echo "$NEW_FILES" | grep -E '\.(jpg|jpeg|png|gif|webp)$' | head -1)
-          if [ -z "$LATEST_IMAGE" ]; then
-            echo "No new image found."
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No image files changed in this push."
             exit 0
           fi
-          echo "Latest image: $LATEST_IMAGE"
 
-          # 构建新图片的完整 CDN 链接
-          IMG_URL="https://cdn.jsdelivr.net/gh/hxqemmm/picBed@${NEW_TAG}/${LATEST_IMAGE}"
-
-          # 处理 list.json（如果不存在则创建）
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          
+          # 处理 list.json
           if [ ! -f list.json ]; then
             echo '[]' > list.json
           fi
-          # 将新图片链接追加到数组最前面（最新的在最前）
-          jq --arg url "$IMG_URL" '. = [$url] + .' list.json > tmp.json && mv tmp.json list.json
+
+          # 遍历所有变更的图片文件，添加到 list.json
+          while IFS= read -r file; do
+            if [ -z "$file" ]; then
+              continue
+            fi
+            
+            # 计算新版本号
+            LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            if [ -z "$LATEST_TAG" ]; then
+              NEW_TAG="v1"
+            else
+              NUM=$(echo $LATEST_TAG | sed 's/v//')
+              NEW_NUM=$((NUM + 1))
+              NEW_TAG="v$NEW_NUM"
+            fi
+
+            # 构建 CDN 链接
+            IMG_URL="https://cdn.jsdelivr.net/gh/hxqemmm/picBed@${NEW_TAG}/${file}"
+            echo "Processing: $file -> $IMG_URL (tag: $NEW_TAG)"
+
+            # 将新图片链接追加到 list.json
+            jq --arg url "$IMG_URL" '. += [$url]' list.json > tmp.json && mv tmp.json list.json
+
+            # 打标签并推送
+            git tag $NEW_TAG
+            git push origin $NEW_TAG
+          done <<< "$CHANGED_FILES"
 
           # 提交 list.json
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add list.json
-          git commit -m "Add image $LATEST_IMAGE to list [skip ci]"
-          git push
-
-          # 打标签并推送
-          git tag $NEW_TAG
-          git push origin $NEW_TAG
+          git commit -m "Add images to list [skip ci]" || echo "Nothing to commit"
+          git push || echo "Push failed or nothing to push"
