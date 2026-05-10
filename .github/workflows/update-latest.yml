@@ -1,0 +1,63 @@
+name: Auto tag and update latest
+
+on:
+  push:
+    paths:
+      - 'img/**'
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 获取完整历史，以便读取所有标签
+
+      - name: Generate new tag and update latest.txt
+        id: tag
+        run: |
+          # 获取当前最大的数字标签
+          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            NEW_TAG="v1"
+          else
+            # 提取数字并加一
+            NUM=$(echo $LATEST_TAG | sed 's/v//')
+            NEW_NUM=$((NUM + 1))
+            NEW_TAG="v$NEW_NUM"
+          fi
+          echo "New tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          
+          # 获取本次推送的 img 目录下新增/修改的文件名
+          NEW_FILES=$(git diff --name-only HEAD^ HEAD -- img/ 2>/dev/null || echo "")
+          if [ -z "$NEW_FILES" ]; then
+            # 如果是第一次推送到空仓库，直接取最新文件
+            NEW_FILES=$(ls -t img/*.{jpg,jpeg,png,gif,webp} 2>/dev/null | head -1)
+          fi
+          # 以换行分隔，只取第一个图片文件作为最新（可根据需要修改）
+          LATEST_IMAGE=$(echo "$NEW_FILES" | grep -E '\.(jpg|jpeg|png|gif|webp)$' | head -1)
+          echo "Latest image: $LATEST_IMAGE"
+          echo "latest_image=$LATEST_IMAGE" >> $GITHUB_OUTPUT
+          
+          # 写入 latest.txt
+          echo "$LATEST_IMAGE" > latest.txt
+
+      - name: Commit and push latest.txt
+        run: |
+          git config user.name "actions"
+          git config user.email "actions@github.com"
+          git add latest.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Update latest.txt before tagging ${{ steps.tag.outputs.new_tag }}"
+            git push
+          fi
+
+      - name: Create tag
+        run: |
+          git tag ${{ steps.tag.outputs.new_tag }}
+          git push origin ${{ steps.tag.outputs.new_tag }}
