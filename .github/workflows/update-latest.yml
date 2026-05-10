@@ -1,4 +1,4 @@
-name: Auto tag and update image list
+name: Ultimate Image List Sync
 
 on:
   push:
@@ -6,80 +6,54 @@ on:
       - 'img/**'
 
 concurrency:
-  group: image-processing-${{ github.ref }}
-  cancel-in-progress: false # 关键！设为 false 保证每次运行都执行完毕
+  group: image-sync
+  cancel-in-progress: true # 如果上一次没跑完，下一次会取消它，确保最终一致性
 
 jobs:
-  process-images:
+  sync-list:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Process images and update list
+      - name: Rebuild Entire Image List
         run: |
-          # 查看推送前和推送后的 commit SHA
-          echo "Previous commit: ${{ github.event.before }}"
-          echo "Current commit: ${{ github.event.after }}"
+          echo "🔄 Rebuilding complete image list..."
 
-          # 如果是新分支，before 可能是全0，做特殊处理
-          if [ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]; then
-            echo "This is a new branch, processing all images in img/ directory."
-            CHANGED_FILES=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \))
-          else
-            # 获取本次推送中变更的图片文件
-            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} -- img/ | grep -E '\.(jpg|jpeg|png|gif|webp)$')
+          # 1. 扫描 img 文件夹下所有图片，生成完整的 CDN 链接列表
+          IMG_LIST=$(find img/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \) | sort | while read -r file; do
+            echo "https://cdn.jsdelivr.net/gh/hxqemmm/picBed@latest/${file}"
+          done | jq -R -s 'split("\n") | map(select(length > 0))')
+
+          # 2. 将完整列表直接覆盖写入 list.json
+          echo "$IMG_LIST" > list.json
+          echo "✅ list.json rebuilt with $(echo $IMG_LIST | jq 'length') images."
+
+          # 3. (可选)同时维护一个 latest.txt 指向最新一张图
+          LATEST_URL=$(echo "$IMG_LIST" | jq -r '.[-1] // empty')
+          if [ -n "$LATEST_URL" ]; then
+            echo "$LATEST_URL" > latest.txt
+            echo "Latest image: $LATEST_URL"
           fi
 
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No image files changed in this push."
-            exit 0
-          fi
-
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          
-          # 处理 list.json
-          if [ ! -f list.json ]; then
-            echo '[]' > list.json
-          fi
-
-          # 遍历所有变更的图片文件，添加到 list.json
-          while IFS= read -r file; do
-            if [ -z "$file" ]; then
-              continue
-            fi
-            
-            # 计算新版本号
-            LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
-            if [ -z "$LATEST_TAG" ]; then
-              NEW_TAG="v1"
-            else
-              NUM=$(echo $LATEST_TAG | sed 's/v//')
-              NEW_NUM=$((NUM + 1))
-              NEW_TAG="v$NEW_NUM"
-            fi
-
-            # 构建 CDN 链接
-            IMG_URL="https://cdn.jsdelivr.net/gh/hxqemmm/picBed@${NEW_TAG}/${file}"
-            echo "Processing: $file -> $IMG_URL (tag: $NEW_TAG)"
-
-            # 将新图片链接追加到 list.json
-            jq --arg url "$IMG_URL" '. += [$url]' list.json > tmp.json && mv tmp.json list.json
-
-            # 打标签并推送
-            git tag $NEW_TAG
-            git push origin $NEW_TAG
-          done <<< "$CHANGED_FILES"
-
-          # 提交 list.json
+          # 4. 提交变更
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
-          git add list.json
-          git commit -m "Add images to list [skip ci]" || echo "Nothing to commit"
-          git push || echo "Push failed or nothing to push"
+          git add list.json latest.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "🔄 Sync full image list [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Force update 'latest' tag
+        run: |
+          # 删除旧的 latest 标签（如果存在），强制重建
+          git push origin :refs/tags/latest 2>/dev/null || echo "No existing 'latest' tag to delete."
+          git tag -f latest
+          git push origin latest
